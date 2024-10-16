@@ -1,5 +1,5 @@
 # Radar equivalent snowpack
-- The user inputs provides a multilayered snowpack in a pandas dataframe.
+- The user provides a multilayered snowpack in a pandas dataframe.
 - Refer to the paper DOI: ... 
 
 # Python Libraries required to run the code
@@ -10,8 +10,8 @@
 
 
 # Using radar equivalent snowpack
-1. Use grouping and averagin function from res_function.py
-2. create an smrt snowpack
+1. Use grouping and averaging functions from res_function.py
+2. Create an smrt snowpack
 3. Run SMRT simulation from
 4. Use notebook to reproduce graph from paper
    
