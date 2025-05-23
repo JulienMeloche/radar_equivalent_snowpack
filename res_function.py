@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
+from scipy.integrate import trapezoid
 import xarray as xr
 from datetime import datetime
 
@@ -9,7 +10,7 @@ import sys
 sys.path.append("/home/jum002/store5/repo/smrt_fork/smrt")
 
 #smrt local import
-from smrt.core.globalconstants import DENSITY_OF_ICE
+from smrt.core.globalconstants import DENSITY_OF_ICE, C_SPEED, FREEZING_POINT
 from smrt import sensor_list, make_model, make_snowpack, make_interface
 from smrt.emmodel import iba
 from smrt.substrate.reflector_backscatter import make_reflector
@@ -35,11 +36,12 @@ def two_layer(snow_df, method = 'thick'):
     return pd.DataFrame([df for df in [snow_1, snow_2] if not df.empty])
 
 
-def three_layer(snow_df, method = 'thick'):
+def three_layer(snow_df, method = 'thick', freq = 17.5e9):
     """
     3 equal thickness method
     method param :str that need indicate average method
     """
+    snow_df['ke'] = compute_ke(snow_df, freq = freq)
     #get norm height
     snow_df.loc[:,'norm_h'] = snow_df.height/snow_df.thickness.sum()
     #split by third and average
@@ -58,18 +60,22 @@ def three_layer(snow_df, method = 'thick'):
         snow_3 = pd.DataFrame()
     return pd.DataFrame([df for df in [snow_1, snow_2, snow_3] if not df.empty])
 
-def two_layer_k(snow_df, method = 'thick'):
+def two_layer_k(snow_df, method = 'thick', freq = 17.5e9):
     """
     Kmeans 2 cluster method
     method param :str that need indicate average method
-    freq: float for frequency of sensor to calculate ke, defaut is TSMM upper Ku
+    freq: float for frequency of sensor, defaut is TSMM upper Ku
     """
-    X = pd.DataFrame({ 'ke' : compute_ke(snow_df), 'height' : snow_df.height})
-    kmeans = KMeans(n_clusters=2, random_state=0, n_init="auto").fit(X)
-    snow_df['label'] = kmeans.labels_
-    
-    df = snow_df.groupby('label', sort = False).apply(lambda x: avg_snow_sum_thick(x, method = method))
-    return df
+    snow_df['ke'] = compute_ke(snow_df, freq = freq)
+    X = np.vstack([snow_df['ke'].values, snow_df['height'].values]).T
+    #X = pd.DataFrame({ 'ke' : snow_df.ke,  'height' : snow_df.height})
+    kmeans = KMeans(n_clusters=2, random_state=0, n_init="auto")
+    snow_df['label'] = kmeans.fit_predict(X)
+
+    grouped = [avg_snow_sum_thick(group, method=method, freq=freq) for label, group in snow_df.groupby('label', sort=False)]
+
+    return pd.DataFrame(grouped)
+
 
 def three_layer_k(snow_df, method = 'thick', freq = 17.5e9):
     """
@@ -77,65 +83,60 @@ def three_layer_k(snow_df, method = 'thick', freq = 17.5e9):
     method param :str that need indicate average method
     freq: float for frequency of sensor, defaut is TSMM upper Ku
     """
-    X = pd.DataFrame({ 'ke' : compute_ke(snow_df, freq =freq),  'height' : snow_df.height})
-    kmeans = KMeans(n_clusters=3, random_state=0, n_init="auto").fit(X)
-    snow_df['label'] = kmeans.labels_
+    snow_df['ke'] = compute_ke(snow_df, freq =freq)
+    X = np.vstack([snow_df['ke'].values, snow_df['height'].values]).T
+    #X = pd.DataFrame({ 'ke' : snow_df.ke,  'height' : snow_df.height})
+    kmeans = KMeans(n_clusters=3, random_state=0, n_init="auto")
+    snow_df['label'] = kmeans.fit_predict(X)
+
+    grouped = [avg_snow_sum_thick(group, method=method, freq=freq) for label, group in snow_df.groupby('label', sort=False)]
+
+    return pd.DataFrame(grouped)
+
+
+def avg_snow_sum_thick(snow_df, method='thick', freq=17.5e9):
+    """
+    Vectorized version of avg_snow_sum_thick function
+    """
+    # Extract arrays once at the beginning
+    thickness = snow_df['thickness'].values
+    thick = np.sum(thickness)
     
-    df = snow_df.groupby('label', sort = False).apply(lambda x: avg_snow_sum_thick(x, method = method, freq =freq))
-    return df
-
-
-
-def compute_ke(snow_df, freq = 17.5e9):
-    """
-    add ke to the snow dataframe
-    freq : frequency at which ke is calculated
-    """
-    if isinstance(snow_df.thickness, np.floating):
-        thickness = [snow_df.thickness]
-    else:
-        thickness = snow_df.thickness
-
-    sp = make_snowpack(thickness=thickness, 
-                        microstructure_model='exponential',
-                        density= snow_df.SNODEN_ML,
-                        temperature= snow_df.TSNOW_ML,
-                        corr_length = debye_eqn(np.array(snow_df.ssa), np.array(snow_df.SNODEN_ML)))
-    #create sensor
-    sensor  = sensor_list.active(freq, 35)
+    # Extract all required data arrays upfront
+    snoden = snow_df['SNODEN_ML'].values
+    ssa = snow_df['ssa'].values
+    tsnow = snow_df['TSNOW_ML'].values
     
-    #get ks from IBA class
-    ks = np.array([iba.IBA(sensor, layer, dense_snow_correction='auto').ks for layer in sp.layers])
-    ka = np.array([iba.IBA(sensor, layer, dense_snow_correction='auto').ka for layer in sp.layers])
-    ke = ks + ka
-    return ke
-
-def avg_snow_sum_thick(snow_df, method = 'thick', freq = 17.5e9):
-    """
-    Averaging method
-    method param :str that need indicate average method
-    """
-    thick = snow_df.thickness.sum()
+    # Pre-calculated weights for all methods
     if method == 'thick':
-        snow_mean = snow_df.apply(lambda x: np.average(x, weights = snow_df.thickness.values), axis =0)
-        snow_mean['thickness'] = thick
-        return snow_mean
-    if method == 'thick-ke':
-        snow_df['ke'] = compute_ke(snow_df, freq = freq)
-        snow_mean = snow_df.apply(lambda x: np.average(x, weights = snow_df.thickness.values * snow_df.ke.values), axis =0)
-        snow_mean['thickness'] = thick
-        return snow_mean
-    if method == 'thick-ke-density':
-        snow_df['ke'] = compute_ke(snow_df, freq = freq)
-        df_copy = snow_df.copy()
-        density_temp = np.average(df_copy.SNODEN_ML, weights = snow_df.thickness.values )
-        snow_mean = snow_df.apply(lambda x: np.average(x, weights =  snow_df.thickness.values*snow_df.ke.values, axis =0))
-        snow_mean['thickness'] = thick
-        snow_mean['SNODEN_ML'] = density_temp
-        return snow_mean
+        weights = thickness
+    elif method in ('thick-ke', 'thick-ke-density'):
+        ke = snow_df['ke'].values
+        weights = thickness * ke
     else:
-        print('provide a valid method')
         return np.nan
+    
+    # Calculate all weighted averages with optimized vectorized operations
+    if method in ('thick', 'thick-ke'):
+        # For 'thick' and 'thick-ke', all columns use the same weights
+        snow_mean = {
+            'SNODEN_ML': np.sum(snoden * weights) / np.sum(weights),
+            'ssa': np.sum(ssa * weights) / np.sum(weights),
+            'TSNOW_ML': np.sum(tsnow * weights) / np.sum(weights)
+        }
+    elif method == 'thick-ke-density':
+        # For 'thick-ke-density', SNODEN_ML uses thickness as weights, others use weights
+        sum_weights = np.sum(weights)
+        sum_thickness = np.sum(thickness)
+        
+        snow_mean = {
+            'SNODEN_ML': np.sum(snoden * thickness) / sum_thickness,
+            'ssa': np.sum(ssa * weights) / sum_weights,
+            'TSNOW_ML': np.sum(tsnow * weights) / sum_weights
+        }
+    
+    snow_mean['thickness'] = thick
+    return pd.Series(snow_mean)
     
 
 """
@@ -160,40 +161,40 @@ def get_sig_swe(df, dates, method, layer_type, model = 'iba', freq = 17.5e9):
         snow1 =  [build_snow(avg_snow_sum_thick(df.loc[date,:])) for date in dates]
         one_result = run_simu(snow1, model = model, freq = freq)
         sig = one_result.sigmaVV().values
-        swe = [avg_snow_sum_thick(df.loc[date,:]).SNODEN_ML * avg_snow_sum_thick(df.loc[date,:]).thickness for date in dates]
-        return dB(sig), swe
+
+        return dB(sig)
 
     if layer_type == 'two':
         snow = [build_snow(two_layer(df.loc[date,:], method = method)) for date in dates]
-        swe = [(two_layer(df.loc[date,:], method = method).SNODEN_ML * two_layer(df.loc[date,:], method = method).thickness).sum() for date in dates]
+
         #calculate backscatter
         result = run_simu(snow, model = model, freq = freq)
         sig = result.sigmaVV().values
-        return dB(sig), np.array(swe)
+        return dB(sig)
     
     if layer_type == 'two_k':
         snow = [build_snow(two_layer_k(df.loc[date,:], method = method)) for date in dates]
-        swe = [(two_layer_k(df.loc[date,:], method = method).SNODEN_ML * two_layer_k(df.loc[date,:], method = method).thickness).sum() for date in dates]
+
         #calculate backscatter
         result = run_simu(snow, model = model, freq = freq)
         sig = result.sigmaVV().values
-        return dB(sig), np.array(swe)
+        return dB(sig)
     
     if layer_type == 'three':
         snow = [build_snow(three_layer(df.loc[date,:], method = method)) for date in dates]
-        swe = [(three_layer(df.loc[date,:], method = method).SNODEN_ML * three_layer(df.loc[date,:], method = method).thickness).sum() for date in dates]
+
         #calculate backscatter
         result = run_simu(snow, model = model, freq = freq, diag_method ='shur_forcedtriu')
         sig = result.sigmaVV().values
-        return dB(sig), np.array(swe)
+        return dB(sig)
     
     if layer_type == 'three_k':
         snow = [build_snow(three_layer_k(df.loc[date,:], method = method, freq = freq)) for date in dates]
-        swe = [(three_layer_k(df.loc[date,:], method = method).SNODEN_ML * three_layer_k(df.loc[date,:], method = method).thickness).sum() for date in dates]  
+
         #calculate backscatter
         result = run_simu(snow, model = model, freq = freq, diag_method ='shur_forcedtriu')
         sig = result.sigmaVV().values
-        return dB(sig), np.array(swe)
+        return dB(sig)
 
 
 def debye_eqn(ssa, density):
@@ -251,7 +252,7 @@ def build_snow(snow_df, transparent = False, transparent_nosurf = False):
     except:
         print(snow_df)
 
-def run_simu(sp, model = 'iba', diag_method = 'eig', freq = 17.5e9):
+def run_simu(sp, model = 'iba', diag_method = 'eig', freq = 17.5e9, passive = False):
     # Run SMRT from SMRT snowpack
 
     #Modeling theories to use in SMRT
@@ -269,7 +270,10 @@ def run_simu(sp, model = 'iba', diag_method = 'eig', freq = 17.5e9):
     
 
 
-    sensor  = sensor_list.active(freq, 35)
+    if passive:
+        sensor  = sensor_list.passive(freq, 55)
+    else:
+        sensor  = sensor_list.active(freq, 35)
     result = model.run(sensor, sp, parallel_computation=True)
     return result
 
@@ -293,3 +297,220 @@ def get_other_var(df, dates):
              'rainRate' : rainRate}
     return param
 
+def import_crocus(file_path, str_year_begin):
+
+    mod = xr.open_dataset(file_path)
+
+    df = mod[['SNODEN_ML','SNOMA_ML','TSNOW_ML','SNODOPT_ML','SNODP']].to_dataframe().dropna() 
+    # SNODEN_ML: densite des couches
+    # SNOMA_ML: SWE des couches
+    # TSNOW_ML: T des couches
+    # SNODOPT_ML: diametre optique des couches
+    # SNODP: hauteur totale du snowpack
+
+    # #filter at 5 seasons of beginin 
+    str_begin = str_year_begin + '-10-01'
+    oct01 = datetime.strptime(str_begin, '%Y-%m-%d')
+
+    df = df.loc[oct01:,:]
+
+
+    df['thickness'] = df[['SNODEN_ML','SNOMA_ML']].apply(lambda x : x[1] / x[0], axis = 1) 
+    df['ssa'] = df['SNODOPT_ML'].apply(lambda x: 6/( x * 917) if x>0 else 0)
+    df['TSNOW_ML'] = df['TSNOW_ML'].apply(lambda x: 273 if x > 273 else x)
+    #df['corr_length'] = df[['SNODEN_ML','ssa']].apply(lambda x: debye_eqn(x[1], x[0]), axis = 1)
+
+    #filter out low snowdepth and small snow layers
+    df = df[(df.SNODP > 0.10) & (df.thickness > 0.005)]
+
+    dates = df.groupby(level = 'time').mean().index.get_level_values(0)
+    #add height to dataframe
+    df.loc[:, 'height'] = np.nan
+    for date in dates:
+        df_temp = df.loc[date,:]
+        df.loc[date,'height'] = np.cumsum(df_temp.thickness.values[::-1])[::-1]
+
+    return df, dates
+
+# def compute_ke(snow_df, freq = 17.5e9, return_ks_ka = False):
+#     """
+#     add ke to the snow dataframe
+#     freq : frequency at which ke is calculated
+#     """
+#     if isinstance(snow_df.thickness, np.floating):
+#         thickness = [snow_df.thickness]
+#     else:
+#         thickness = snow_df.thickness
+
+#     sp = make_snowpack(thickness=thickness, 
+#                         microstructure_model='exponential',
+#                         density= snow_df.SNODEN_ML,
+#                         temperature= snow_df.TSNOW_ML,
+#                         corr_length = debye_eqn(np.array(snow_df.ssa), np.array(snow_df.SNODEN_ML)))
+#     #create sensor
+#     sensor  = sensor_list.active(freq, 35)
+    
+#     #get ks from IBA class
+#     ks = np.array([iba.IBA(sensor, layer, dense_snow_correction='auto').ks for layer in sp.layers])
+#     ka = np.array([iba.IBA(sensor, layer, dense_snow_correction='auto').ka for layer in sp.layers])
+
+#     if return_ks_ka:
+#         return ks, ka
+#     else:
+#         ke = ks + ka
+
+#         return ke
+
+def water_permittivity_maetzler87(frequency, temperature):
+    """Calculates the complex water dielectric constant depending on the frequency and temperature
+     Based on Mätzler, C., & Wegmuller, U. (1987). Dielectric properties of freshwater
+     ice at microwave frequencies. *Journal of Physics D: Applied Physics*, 20(12), 1623-1630.
+
+     :param frequency: frequency in Hz
+     :param temperature: temperature in K
+     :raises Exception: if liquid water > 0 or salinity > 0 (model unsuitable)
+     :returns: complex permittivity of pure ice
+"""
+
+    freqGHz = frequency / 1e9
+
+    theta = 1 - 300.0 / temperature
+
+    e0 = 77.66 - 103.3 * theta
+    e1 = 0.0671 * e0
+
+    f1 = 20.2 + 146.4 * theta + 316 * theta**2
+    e2 = 3.52 + 7.52 * theta
+    #  % version of Liebe MPM 1993 uses: e2=3.52
+    f2 = 39.8 * f1
+
+    Ew = e2 + (e1 - e2) / complex(1, -freqGHz / f2) + (e0 - e1) / complex(1, -freqGHz / f1)
+
+    return Ew
+
+def ice_permittivity(frequency, temperature, liquid_water = 0):
+    """ 
+    FROM SMRT**** credit to Ghislain Picard
+    Calculates the complex ice dielectric constant depending on the frequency and temperature.
+
+    Based on Mätzler, C. (1998). Thermal Microwave Radiation: Applications for Remote Sensing p456-461
+    """
+
+    freqGHz = frequency / 1e9
+
+    tempC = temperature - FREEZING_POINT
+
+    Ereal = 3.1884 + 9.1e-4 * tempC
+
+    theta = 300.0 / temperature - 1.0
+    alpha = (0.00504 + 0.0062 * theta) * np.exp(-22.1 * theta)
+
+    B1 = 0.0207
+    B2 = 1.16e-11
+    b = 335.
+    deltabeta = np.exp(- 9.963 + 0.0372 * tempC)
+    betam = (B1 / temperature) * (np.exp(b / temperature) / ((np.exp(b / temperature) - 1)**2)) + B2 * freqGHz**2
+    beta = betam + deltabeta
+
+    Eimag = alpha / freqGHz + beta * freqGHz
+
+    epsice = Ereal + 1j * Eimag
+
+    if np.all(liquid_water <= 0.0):
+        return epsice
+
+    epswater = water_permittivity_maetzler87(frequency, temperature)
+
+    ice_water_frac_volume = 1 - liquid_water
+    #maxwell garnett for spheres
+    # frac volume with water, if no water then same as dry snow
+    Cplus = epsice + 2 * epswater
+    Cminus = (epsice - epswater) * ice_water_frac_volume
+
+    Emg = (Cplus + 2 * Cminus) / (Cplus - Cminus) * epswater
+
+    return Emg
+
+def ks_integrand(mu, frac_volume, corr_length, k0, eps, effective_permittivity):
+    """ 
+    FROM SMRT**** credit to Ghislain Picard
+    Calculates the complex ice dielectric constant depending on the frequency and temperature.
+
+    Based on Mätzler, C. (1998). Improved Born Approximation
+    """
+    sintheta_2 = np.sqrt((1. - mu) / 2.)  # = np.sin(theta / 2.)
+    k_diff = np.asarray(2. * k0 * sintheta_2 * abs(np.sqrt(effective_permittivity)))
+
+    e0 = 1
+    depolarization_factors = 1. / 3.
+
+    """compute the fourier transform of the autocorrelation function analytically"""
+    corr_func_at_origin =  frac_volume * (1.0 - frac_volume)
+    X = (k_diff* corr_length)**2
+    ft_corr_fn = corr_func_at_origin * 8 * np.pi * corr_length**3 / (1. + X)**2
+
+    #mean squared field ratio
+    e0 = 1
+    depolarization_factors = 1. / 3.
+    apparent_permittivity = effective_permittivity * (1 - depolarization_factors) + e0 * depolarization_factors
+    y2 =   np.absolute(apparent_permittivity / (apparent_permittivity + (eps - e0) * depolarization_factors))**2.
+    iba_coeff = (1. / (4. * np.pi)) * np.absolute(eps - e0)**2. * y2 * (k0)**4
+    p11 = (iba_coeff * ft_corr_fn).real * mu**2
+    p22 = (iba_coeff * ft_corr_fn).real * 1.
+    ks_int = (p11 + p22)
+
+    return ks_int.real
+
+def compute_ke_iba(frequency, temperature, density, ssa):
+    """ 
+    FROM SMRT**** credit to Ghislain Picard
+    Calculates the complex ice dielectric constant depending on the frequency and temperature.
+
+    Based on Mätzler, C. (1998). Improved Born Approximation
+    """
+    corr_length = debye_eqn(ssa, density)
+    frac_volume = density/DENSITY_OF_ICE
+    e0 = 1.0
+    eps = ice_permittivity(frequency, temperature, liquid_water = 0)
+    #eps = complex(3.185, 0.005)
+
+    k0 = 2 * np.pi * frequency / C_SPEED
+    depolarization_factors = 1. / 3.
+    effective_permittivity = np.complex128(e0 * (1 + frac_volume * (eps - e0) / (e0 + (1. - frac_volume) * depolarization_factors * (eps - e0))))
+    
+    #ks
+    #Calculate scattering coefficient: integrate p11+p12 over mu
+    k = 3  # number of samples. This should be adaptative depending on the size/wavelength
+    #mu = np.linspace(1, -1, 2**k + 1)
+    mu = np.expand_dims(np.linspace(1, -1, 2**k + 1), axis =1)
+    y = ks_integrand(mu, frac_volume, corr_length, k0, eps, effective_permittivity)
+    ks_int = np.trapz(y, -mu, axis =0)  # integrate on mu between -1 and 1
+    ks = ks_int / 4.  # Ding et al. (2010), normalised by (1/4pi)
+
+    #ka
+    k0 = 2 * np.pi * frequency / C_SPEED
+    ka = 2 * k0 * np.sqrt(effective_permittivity).imag
+
+    return ka + ks
+
+def compute_ke_rayleigh(frequency, temperature, density, ssa):
+    frac_volume = density / DENSITY_OF_ICE
+
+    e0 = 1
+    eps = ice_permittivity(frequency, temperature, liquid_water = 0)
+    lmda = C_SPEED / frequency
+
+    radius = 6/(DENSITY_OF_ICE * ssa)
+
+    k0 = 2 * np.pi / lmda
+
+    ks = frac_volume * 2 * abs((eps - e0) / (eps + 2 * e0))**2 * radius**3 * e0**2 * k0**4
+    ka = frac_volume * 9 * k0 * eps.imag * abs(e0 / (eps + 2 * e0))**2 + (1 - frac_volume) * e0.imag * k0
+
+    return ks + ka
+
+def compute_ke(df, freq = 17.5e9, method = 'iba'):
+    if method == 'iba':
+        return compute_ke_iba(freq, df.TSNOW_ML.values, df.SNODEN_ML.values, df.ssa.values)
+    if method == 'rayleigh':
+        return compute_ke_rayleigh(freq, df.TSNOW_ML.values, df.SNODEN_ML.values, df.ssa.values)
