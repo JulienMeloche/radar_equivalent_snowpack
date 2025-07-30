@@ -13,7 +13,7 @@ The radar equivalent snowpack method estimates simplified radar-equivalent chara
 
 The electromagnetic calculations are primarily derived from the **SMRT** model (https://github.com/smrt-model/smrt). This code was developed by Julien Meloche for Environment and Climate Change Canada (ECCC).
 
-Jupyter notebooks is included, focusing on the results and Figures from Meloche et al. (2025).
+See ``paper`` for jupyter notebooks focusing on the results and Figures from Meloche et al. (2025).
 
 ---
 
