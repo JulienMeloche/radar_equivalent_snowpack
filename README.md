@@ -22,10 +22,7 @@ See ``paper`` for jupyter notebooks focusing on the results and Figures from Mel
 Python libraries required to run the code:
 
 - `numpy`  
-- `pandas`  
-- `xarray`  
-- `scipy`  
-- `numba` (for acceleration)
+- `numba`
 
 ---
 
